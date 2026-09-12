@@ -40,8 +40,8 @@ export default function Dashboard() {
   // Alert Settings state
   const [alertConfig, setAlertConfig] = useState<AlertConfig>({
     telegramEnabled: true,
-    telegramBotToken: '',
-    telegramChatId: '8630465075',
+    telegramBotToken: '8760488329:AAHwrEKD8Wn5o5v21jrxvkleOHxectNnId0',
+    telegramChatId: '766459648',
     emailEnabled: true,
     emailRecipient: 'dugu19raj@gmail.com',
     soundEnabled: true,
