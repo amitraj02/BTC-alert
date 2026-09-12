@@ -7,26 +7,40 @@ with macOS sound alerts and custom wick length thresholds (> 250 points).
 import sys
 import os
 import time
+import json
+import threading
 import subprocess
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ==============================================================================
-#  USER CONFIGURATION
+#  USER CONFIGURATION & ENVIRONMENT VARIABLES
 # ==============================================================================
-# You can hardcode your preferred time interval here.
 # Supported intervals: "1m", "15m", "30m", "60m" (or "1h")
-TIME_INTERVAL = "60m"
-
-# Minimum wick length (in price points / USDT) to trigger terminal highlighting and special labels
-WICK_THRESHOLD = 500.0
+TIME_INTERVAL = os.environ.get("TIME_INTERVAL", "60m")
+WICK_THRESHOLD = float(os.environ.get("WICK_THRESHOLD", 500.0))
+PORT = int(os.environ.get("PORT", 10000))
 
 # Alert Recipient Email
-ALERT_EMAIL_RECIPIENT = "dugu19raj@gmail.com"
+ALERT_EMAIL_RECIPIENT = os.environ.get("ALERT_EMAIL_RECIPIENT", "dugu19raj@gmail.com")
 
 # Telegram Bot Alert Credentials
-TELEGRAM_CHAT_ID = "8630465075"
-TELEGRAM_BOT_TOKEN = ""  # Set your bot token from @BotFather e.g. "123456789:ABC..."
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "766459648")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8760488329:AAHwrEKD8Wn5o5v21jrxvkleOHxectNnId0")
+
+# Global State for Health Check & Status Dashboard
+_BOT_STATE = {
+    "status": "Active & Monitoring 🟢",
+    "start_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    "last_check_time": None,
+    "last_ltp": None,
+    "interval": TIME_INTERVAL,
+    "total_scans": 0,
+    "total_alerts_sent": 0,
+    "recent_alerts": []
+}
+_STATE_LOCK = threading.Lock()
 
 
 
@@ -199,8 +213,143 @@ def send_telegram_alert(s):
         else:
             # Proxy via local API route
             requests.post("http://localhost:3000/api/alerts/telegram", json={"chatId": TELEGRAM_CHAT_ID, "message": msg}, timeout=2)
+
+        with _STATE_LOCK:
+            _BOT_STATE["total_alerts_sent"] += 1
+            _BOT_STATE["recent_alerts"].insert(0, {
+                "type": s["type"],
+                "time": s["time"],
+                "price": s["close"],
+                "wick": s["wick"],
+            })
+            _BOT_STATE["recent_alerts"] = _BOT_STATE["recent_alerts"][:15]
     except Exception:
         pass
+
+
+# ==============================================================================
+#  HTTP HEALTH CHECK & STATUS WEB SERVER (For Render & Uptime Pingers)
+# ==============================================================================
+
+class BotStatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/health", "/healthz"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            with _STATE_LOCK:
+                self.wfile.write(json.dumps({"status": "ok", "state": _BOT_STATE}).encode("utf-8"))
+            return
+
+        with _STATE_LOCK:
+            ltp_disp = f"${_BOT_STATE['last_ltp']:,.2f}" if _BOT_STATE["last_ltp"] else "Fetching..."
+            scans_disp = _BOT_STATE["total_scans"]
+            alerts_disp = _BOT_STATE["total_alerts_sent"]
+            last_chk = _BOT_STATE["last_check_time"] or "Initializing..."
+            alerts_html = ""
+            for a in _BOT_STATE["recent_alerts"]:
+                badge_color = "#10b981" if "Low" in a["type"] or "Bullish" in a["type"] else "#ef4444"
+                alerts_html += f"""
+                <tr style="border-bottom: 1px solid #334155;">
+                    <td style="padding: 10px; color: {badge_color}; font-weight: bold;">{a['type']}</td>
+                    <td style="padding: 10px;">${a['price']:,.2f}</td>
+                    <td style="padding: 10px;">{a['wick']:.2f} pts</td>
+                    <td style="padding: 10px; color: #94a3b8;">{a['time']}</td>
+                    <td style="padding: 10px;">✅ Sent</td>
+                </tr>
+                """
+            if not alerts_html:
+                alerts_html = "<tr><td colspan='5' style='padding: 20px; text-align: center; color: #64748b;'>No live alerts triggered yet. Monitoring in progress...</td></tr>"
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>BTC Swing Alert Bot - Live Status</title>
+    <meta http-equiv="refresh" content="30">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; margin: 0; padding: 24px; }}
+        .container {{ max-width: 850px; margin: 0 auto; }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 16px; margin-bottom: 24px; }}
+        .badge {{ background: #064e3b; color: #34d399; padding: 6px 14px; border-radius: 9999px; font-weight: bold; font-size: 14px; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }}
+        .card {{ background: #131b2e; border: 1px solid #1e293b; border-radius: 12px; padding: 18px; }}
+        .card-label {{ font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }}
+        .card-val {{ font-size: 22px; font-weight: bold; margin-top: 6px; color: #38bdf8; }}
+        table {{ width: 100%; border-collapse: collapse; background: #131b2e; border: 1px solid #1e293b; border-radius: 12px; overflow: hidden; }}
+        th {{ background: #1e293b; padding: 12px 10px; text-align: left; font-size: 13px; color: #94a3b8; }}
+        .footer {{ margin-top: 24px; text-align: center; font-size: 13px; color: #64748b; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1 style="margin: 0; font-size: 24px;">🚀 BTC Swing Alert Bot</h1>
+                <p style="margin: 4px 0 0 0; color: #94a3b8; font-size: 14px;">CoinDCX 24/7 Scanner & Telegram Dispatcher</p>
+            </div>
+            <div class="badge">● ACTIVE 24/7</div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-label">BTC/USDT Live LTP</div>
+                <div class="card-val" style="color: #f59e0b;">{ltp_disp}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Timeframe</div>
+                <div class="card-val">{TIME_INTERVAL}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Total Scans</div>
+                <div class="card-val">{scans_disp}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Alerts Sent</div>
+                <div class="card-val" style="color: #10b981;">{alerts_disp}</div>
+            </div>
+        </div>
+
+        <h3 style="margin-bottom: 12px; font-size: 16px;">📋 Recent Live Alerts</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Signal Type</th>
+                    <th>Price</th>
+                    <th>Wick</th>
+                    <th>Candle Time</th>
+                    <th>Telegram</th>
+                </tr>
+            </thead>
+            <tbody>
+                {alerts_html}
+            </tbody>
+        </table>
+
+        <div class="footer">
+            Last checked: {last_chk} | Telegram Chat ID: <b>{TELEGRAM_CHAT_ID}</b>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_server():
+    """Starts the HTTP server in a background daemon thread."""
+    try:
+        server = HTTPServer(("0.0.0.0", PORT), BotStatusHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"{G}🌐 Web Health Check & Status Server running on port {PORT}{X}")
+    except Exception as e:
+        print(f"{Y}⚠️ Could not bind web server to port {PORT}: {e}{X}")
 
 
 
@@ -392,7 +541,10 @@ def print_swing_event(s, is_live=False, ltp_current=None):
 # ==============================================================================
 
 def main():
-    # Use hardcoded TIME_INTERVAL as default
+    # Start web health-check & status server in daemon thread
+    start_health_server()
+
+    # Use hardcoded TIME_INTERVAL or env as default
     interval_name = TIME_INTERVAL
     
     # Override with command-line argument if provided
@@ -407,6 +559,9 @@ def main():
     # Fallback to "60m" if the hardcoded TIME_INTERVAL itself is invalid
     if interval_name not in INTERVAL_MAPPING:
         interval_name = "60m"
+    
+    with _STATE_LOCK:
+        _BOT_STATE["interval"] = interval_name
     
     api_interval = INTERVAL_MAPPING[interval_name]
 
@@ -457,6 +612,17 @@ def main():
         while True:
             # Fetch a small set of recent candles to inspect for the latest swings
             candles = fetch_candles(10, interval_name=interval_name)
+            ltp_current = get_current_ltp()
+            if ltp_current is None and candles:
+                ltp_current = float(candles[0]["close"])
+
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            with _STATE_LOCK:
+                _BOT_STATE["last_check_time"] = now_str
+                _BOT_STATE["total_scans"] += 1
+                if ltp_current:
+                    _BOT_STATE["last_ltp"] = ltp_current
+
             if candles:
                 swings = analyze_swings(candles)
                 
@@ -465,11 +631,6 @@ def main():
                     if s["index"] >= 3:
                         ts = s["timestamp_ms"]
                         if ts not in alerted_timestamps:
-                            # Retrieve the current live LTP for accurate notification printing
-                            ltp_current = get_current_ltp()
-                            if ltp_current is None:
-                                ltp_current = float(candles[0]["close"])
-                            
                             # Play macOS alert sound
                             play_alert_sound()
                             # Send email alert to recipient
@@ -482,9 +643,6 @@ def main():
                             alerted_timestamps.add(ts)
                 
                 # Render/Update the CLI liveness status indicator
-                ltp_current = get_current_ltp()
-                if ltp_current is None:
-                    ltp_current = float(candles[0]["close"])
                 sys.stdout.write(f"\r🔍 Monitoring... Last checked: {time.strftime('%H:%M:%S')} | BTC LTP: ${ltp_current:,.2f}")
                 sys.stdout.flush()
             

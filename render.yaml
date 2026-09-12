@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: btc-swing-alert-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python btc_py/swing_low_signal_finder.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: TIME_INTERVAL
+        value: 60m
+      - key: WICK_THRESHOLD
+        value: "500.0"
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8760488329:AAHwrEKD8Wn5o5v21jrxvkleOHxectNnId0
+      - key: TELEGRAM_CHAT_ID
+        value: "766459648"
